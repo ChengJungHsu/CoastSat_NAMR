@@ -4,7 +4,6 @@ This module contains utilities to work with satellite images
 Author: Kilian Vos, Water Research Laboratory, University of New South Wales
 """
 
-# load modules
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -459,21 +458,15 @@ def get_filenames(filename, filepath, satname):
     fn: str or list of str
         contains the filepath + filenames to access the satellite image
         
-    """ 
-    ms_suffix_Landsat = 'ms.tif'    
-    mask_suffix_Landsat = 'mask.tif'
-    pan_suffix_Landsat = 'pan.tif'
-    if 'dup' in filename:
-        ms_suffix_Landsat = 'ms_%s'%(filename.split('_')[-1])
-        mask_suffix_Landsat = 'mask_%s'%(filename.split('_')[-1])
-        pan_suffix_Landsat = 'pan_%s'%(filename.split('_')[-1])
+    """     
+    
     if satname == 'L5':
-        fn_mask = filename.replace(ms_suffix_Landsat,mask_suffix_Landsat)
+        fn_mask = filename.replace('ms.tif','mask.tif')
         fn = [os.path.join(filepath[0], filename),
               os.path.join(filepath[1], fn_mask)]
     if satname in ['L7','L8','L9']:
-        fn_pan = filename.replace(ms_suffix_Landsat,pan_suffix_Landsat)
-        fn_mask = filename.replace(ms_suffix_Landsat,mask_suffix_Landsat)
+        fn_pan = filename.replace('ms.tif','pan.tif')
+        fn_mask = filename.replace('ms.tif','mask.tif')
         fn = [os.path.join(filepath[0], filename),
               os.path.join(filepath[1], fn_pan),
               os.path.join(filepath[2], fn_mask)]
@@ -811,9 +804,113 @@ def output_to_gdf(output, geomtype):
                 gdf_all = gdf
             else:
                 gdf_all = pd.concat([gdf_all, gdf])
-            counter = counter + 1
-            
+            counter = counter + 1   
+    
     return gdf_all
+
+def output_to_gdf_multilines(output, distance_threshold):
+    """
+    Saves the mapped shorelines as a gpd.GeoDataFrame for multilinestring geometry type
+    Multipoint geometry segements by distance_threshold
+
+    CJHsu NAMR 2025
+
+    Arguments:
+    -----------
+    output: dict
+        contains the coordinates of the mapped shorelines + attributes     
+    distance_threshold: val
+        segementation critiera, unit depend on coordinate reference system(crs)
+                    
+    Returns:    
+    -----------
+    gdf_all: gpd.GeoDataFrame
+        contains the shorelines + attirbutes
+  
+    """    
+     
+    # loop through the mapped shorelines
+    counter = 0
+    gdf_all = None
+    for i in range(len(output['shorelines'])):
+        # skip if there shoreline is empty 
+        if len(output['shorelines'][i]) < 2:
+            continue
+        else:
+            #
+            coords = output['shorelines'][i]
+            distances_numpy = np.linalg.norm(coords[1:] - coords[:-1], axis=1)
+            break_points = np.where(distances_numpy > distance_threshold)[0]
+            split_indices = break_points + 1
+            segmented_sequences = np.split(coords, split_indices)
+            if len(segmented_sequences) > 1:
+                # Filter out segments that have only one point
+                filtered_segments = []
+                for j, segment in enumerate(segmented_sequences):
+                    if segment.shape[0] > 1: 
+                        filtered_segments.append(segment)
+                        segmented_sequences=filtered_segments
+            geom = geometry.MultiLineString(segmented_sequences)
+            # save into geodataframe with attributes
+            gdf = gpd.GeoDataFrame(geometry=gpd.GeoSeries(geom))
+            gdf.index = [i]
+            gdf.loc[i,'date'] = output['dates'][i].strftime('%Y-%m-%d %H:%M:%S')
+            gdf.loc[i,'satname'] = output['satname'][i]
+            gdf.loc[i,'geoaccuracy'] = output['geoaccuracy'][i]
+            gdf.loc[i,'cloud_cover'] = output['cloud_cover'][i]
+            # store into geodataframe
+            if counter == 0:
+                gdf_all = gdf
+            else:
+                gdf_all = pd.concat([gdf_all, gdf])
+            counter = counter + 1           
+    return gdf_all
+
+def output_from_geojson(filename):
+    """
+    load shorelines from a .geojson file.
+    polygon style should be a line.
+    check output data in SDS_tools.output_to_gdf(output, geomtype)
+    
+    CJHsu NAMR 2025
+    
+    Arguments:
+    -----------
+    filename: str
+        contains the path and filename of the geojson file to be loaded
+        
+    Returns:    
+    -----------
+    output: dict
+        output contains shorelines information including 'dates', 'shorelines', 'cloud_cover', 'geoaccuracy', 'satname'
+        
+    """
+    gdf = gpd.read_file(filename, driver='GeoJSON')
+    output = dict([])
+
+    # init output variables # unused var:'filename', 'idx', 'MNDWI_threshold'
+    output_timestamp = []  # datetime at which the image was acquired (UTC time)
+    output_shoreline = []  # vector of shoreline points
+    output_geoaccuracy = []# georeferencing accuracy of the images
+    output_cloudcover = [] # cloud cover of the images
+    output_stname = []     # satellite name
+
+    for i in gdf.index:
+        output_shoreline.append(np.array(gdf.loc[i,'geometry'].coords))
+        output_stname.append(gdf.loc[i,'satname'])
+        output_cloudcover.append(gdf.loc[i,'cloud_cover'])
+        output_geoaccuracy.append(gdf.loc[i,'geoaccuracy'])
+        output_timestamp.append(gdf.loc[i,'date'].to_pydatetime().replace(tzinfo=pytz.utc))
+    
+    output = {
+        'dates': output_timestamp,
+        'shorelines': output_shoreline,
+        'cloud_cover': output_cloudcover,
+        'geoaccuracy': output_geoaccuracy,
+        'satname': output_stname,
+        }
+              
+    return output
 
 def transects_to_gdf(transects):
     """
@@ -880,7 +977,7 @@ def smallest_rectangle(polygon):
 
 def make_animation_mp4(filepath_images, fps, fn_out):
     "function to create an animation with the saved figures"
-    with imageio.get_writer(fn_out, mode='I', fps=fps) as writer:
+    with imageio.get_writer(fn_out, mode='I', duration=1000/fps) as writer:
         filenames = os.listdir(filepath_images)
         # order chronologically
         filenames = np.sort(filenames)
